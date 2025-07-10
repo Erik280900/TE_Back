@@ -1,15 +1,16 @@
-// Backend FullStack Railway: WebSocket + API + Frontend + DB
+// Backend FullStack Render: WebSocket + API + Frontend + DB
 const WebSocket = require('ws');
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const http = require('http');
 
 // Configurar Express para API REST + Frontend
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Configurar PostgreSQL para Railway (automático si está disponible)
+// Configurar PostgreSQL para Render (automático si está disponible)
 let pool = null;
 if (process.env.DATABASE_URL) {
   const { Pool } = require('pg');
@@ -20,11 +21,13 @@ if (process.env.DATABASE_URL) {
   console.log('✅ PostgreSQL conectado via DATABASE_URL');
 }
 
-// Puerto dinámico para Railway
+// Puerto único para HTTP y WebSocket en Render
 const HTTP_PORT = process.env.PORT || 3000;
-const WS_PORT = process.env.WS_PORT || (HTTP_PORT + 1);
 
-// WebSocket Server
+// Crear servidor HTTP
+const server = http.createServer(app);
+
+// WebSocket en el MISMO servidor HTTP (arreglo para Render)
 let wss;
 let clients = [];
 
@@ -35,14 +38,18 @@ let nextId = 1;
 // === SERVIR FRONTEND REACT ===
 app.use(express.static(path.join(__dirname, 'public')));
 
-// === WEBSOCKET ===
+// === WEBSOCKET EN EL MISMO PUERTO ===
 function initWebSocket() {
   try {
-    wss = new WebSocket.Server({ port: WS_PORT });
-    console.log(`📡 WebSocket iniciado en puerto ${WS_PORT}`);
+    // WebSocket compartiendo el servidor HTTP
+    wss = new WebSocket.Server({ 
+      server: server,
+      path: '/ws' // Opcional: usar path específico
+    });
+    console.log(`📡 WebSocket iniciado en el mismo puerto ${HTTP_PORT}`);
     
-    wss.on('connection', (ws) => {
-      console.log('🌐 WebApp conectada');
+    wss.on('connection', (ws, req) => {
+      console.log('🌐 WebApp conectada via WebSocket');
       clients.push(ws);
       
       ws.send('WEB_BLUETOOTH_READY');
@@ -86,6 +93,7 @@ function initWebSocket() {
           }
         }
         
+        // Broadcast a otros clientes
         clients.forEach(client => {
           if (client !== ws && client.readyState === WebSocket.OPEN) {
             client.send(message);
@@ -97,9 +105,20 @@ function initWebSocket() {
         console.log('🌐 WebApp desconectada');
         clients = clients.filter(client => client !== ws);
       });
+
+      ws.on('error', (error) => {
+        console.error('🚨 WebSocket error:', error);
+        clients = clients.filter(client => client !== ws);
+      });
     });
+
+    wss.on('error', (error) => {
+      console.error('🚨 WebSocket Server error:', error);
+    });
+    
   } catch (err) {
-    console.log('⚠️ WebSocket no pudo iniciarse en puerto', WS_PORT, '- continuando sin WebSocket');
+    console.error('❌ WebSocket no pudo iniciarse:', err);
+    console.log('⚠️ Continuando sin WebSocket - solo API REST funcionará');
   }
 }
 
@@ -124,12 +143,15 @@ async function guardarEjercicioDB(ejercicioData) {
     const result = await pool.query(query, values);
     console.log('💾 Ejercicio guardado en PostgreSQL:', result.rows[0]);
     
-    const notificacion = `EJERCICIO_GUARDADO:${JSON.stringify(result.rows[0])}`;
-    clients.forEach(client => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(notificacion);
-      }
-    });
+    // Notificar via WebSocket si está disponible
+    if (wss && clients.length > 0) {
+      const notificacion = `EJERCICIO_GUARDADO:${JSON.stringify(result.rows[0])}`;
+      clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(notificacion);
+        }
+      });
+    }
     
   } catch (err) {
     console.error('❌ Error guardando en PostgreSQL:', err);
@@ -143,12 +165,15 @@ function guardarEjercicioMemoria(ejercicioData) {
     ejerciciosDB.push(ejercicioData);
     console.log('💾 Ejercicio guardado en memoria:', ejercicioData);
     
-    const notificacion = `EJERCICIO_GUARDADO:${JSON.stringify(ejercicioData)}`;
-    clients.forEach(client => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(notificacion);
-      }
-    });
+    // Notificar via WebSocket si está disponible
+    if (wss && clients.length > 0) {
+      const notificacion = `EJERCICIO_GUARDADO:${JSON.stringify(ejercicioData)}`;
+      clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(notificacion);
+        }
+      });
+    }
     
   } catch (err) {
     console.error('❌ Error guardando ejercicio en memoria:', err);
@@ -183,18 +208,20 @@ async function initDatabase() {
 
 app.get('/api', (req, res) => {
   res.json({ 
-    message: 'Fitness Arduino FullStack API', 
+    message: 'Fitness Arduino FullStack API - Render', 
     status: 'active',
     frontend: 'React servido estáticamente',
     backend: 'Node.js + WebSocket',
     database: pool ? 'PostgreSQL' : 'Memoria RAM',
-    websocket_port: WS_PORT,
+    websocket: wss ? 'Activo en mismo puerto' : 'No disponible',
+    websocket_clients: clients.length,
     http_port: HTTP_PORT,
     endpoints: [
       'GET / - Frontend React',
       'POST /api/ejercicio - Guardar ejercicio',
       'GET /api/historial - Ver historial', 
-      'GET /api/estadisticas - Estadísticas'
+      'GET /api/estadisticas - Estadísticas',
+      'WebSocket /ws - Comunicación tiempo real'
     ]
   });
 });
@@ -235,10 +262,32 @@ app.post('/api/ejercicio', async (req, res) => {
       ];
 
       const result = await pool.query(query, values);
+      
+      // Notificar via WebSocket
+      if (wss && clients.length > 0) {
+        const notificacion = `EJERCICIO_GUARDADO:${JSON.stringify(result.rows[0])}`;
+        clients.forEach(client => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(notificacion);
+          }
+        });
+      }
+      
       res.json({ success: true, data: result.rows[0] });
     } else {
       nuevoEjercicio.id = nextId++;
       ejerciciosDB.push(nuevoEjercicio);
+      
+      // Notificar via WebSocket
+      if (wss && clients.length > 0) {
+        const notificacion = `EJERCICIO_GUARDADO:${JSON.stringify(nuevoEjercicio)}`;
+        clients.forEach(client => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(notificacion);
+          }
+        });
+      }
+      
       res.json({ success: true, data: nuevoEjercicio });
     }
 
@@ -261,7 +310,8 @@ app.get('/api/historial', async (req, res) => {
       res.json({
         success: true,
         data: result.rows,
-        source: 'PostgreSQL'
+        source: 'PostgreSQL',
+        total: result.rows.length
       });
     } else {
       const historial = ejerciciosDB
@@ -271,7 +321,8 @@ app.get('/api/historial', async (req, res) => {
       res.json({
         success: true,
         data: historial,
-        source: 'Memoria'
+        source: 'Memoria',
+        total: historial.length
       });
     }
 
@@ -326,34 +377,72 @@ app.get('/api/estadisticas', async (req, res) => {
   }
 });
 
+// === HEALTH CHECK ===
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    websocket_clients: clients.length,
+    database: pool ? 'connected' : 'memory',
+    port: HTTP_PORT
+  });
+});
+
 // === SERVIR REACT APP ===
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// === INICIO ===
+// === INICIO DEL SERVIDOR ===
 async function startServer() {
-  await initDatabase();
-  initWebSocket();
-  
-  app.listen(HTTP_PORT, '0.0.0.0', () => {
-    console.log(`🚀 FullStack Server corriendo en puerto ${HTTP_PORT}`);
-    console.log(`📱 Frontend: http://localhost:${HTTP_PORT}`);
-    console.log(`🌐 API: http://localhost:${HTTP_PORT}/api`);
-    console.log(`📡 WebSocket: puerto ${WS_PORT}`);
-    console.log(`💾 Database: ${pool ? 'PostgreSQL' : 'Memoria RAM'}`);
-    console.log('✅ ¡Sistema FullStack listo para Railway!');
-  });
+  try {
+    await initDatabase();
+    initWebSocket();
+    
+    // Usar el servidor HTTP que incluye WebSocket
+    server.listen(HTTP_PORT, '0.0.0.0', () => {
+      console.log(`🚀 FullStack Server corriendo en puerto ${HTTP_PORT}`);
+      console.log(`📱 Frontend: https://te-back.onrender.com`);
+      console.log(`🌐 API: https://te-back.onrender.com/api`);
+      console.log(`📡 WebSocket: mismo puerto ${HTTP_PORT} (path: /ws)`);
+      console.log(`💾 Database: ${pool ? 'PostgreSQL' : 'Memoria RAM'}`);
+      console.log(`👥 WebSocket clients: ${clients.length}`);
+      console.log('✅ ¡Sistema FullStack listo para Render!');
+    });
+  } catch (err) {
+    console.error('❌ Error iniciando servidor:', err);
+    process.exit(1);
+  }
 }
 
-startServer().catch(err => {
-  console.error('❌ Error iniciando servidor:', err);
-  process.exit(1);
-});
+startServer();
 
+// === MANEJO DE CIERRE GRACEFUL ===
 process.on('SIGINT', async () => {
   console.log('🔄 Cerrando servidor FullStack...');
-  if (pool) await pool.end();
+  
+  // Cerrar WebSocket
+  if (wss) {
+    console.log('📡 Cerrando WebSocket...');
+    wss.close();
+  }
+  
+  // Cerrar base de datos
+  if (pool) {
+    console.log('💾 Cerrando conexión PostgreSQL...');
+    await pool.end();
+  }
+  
+  // Cerrar servidor HTTP
+  server.close(() => {
+    console.log('🛑 Servidor cerrado correctamente');
+    process.exit(0);
+  });
+});
+
+process.on('SIGTERM', async () => {
+  console.log('🔄 SIGTERM recibido - cerrando servidor...');
   if (wss) wss.close();
-  process.exit(0);
+  if (pool) await pool.end();
+  server.close(() => process.exit(0));
 });
