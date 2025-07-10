@@ -1,0 +1,22 @@
+{
+  "name": "fitness-arduino-render",
+  "version": "1.0.0",
+  "description": "Sistema IoT FullStack con Arduino",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "build": "echo 'No build needed'"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "cors": "^2.8.5",
+    "ws": "^8.18.2",
+    "pg": "^8.16.3"
+  },
+  "engines": {
+    "node": "18.x"
+  },
+  "keywords": ["arduino", "iot", "fitness", "render"],
+  "author": "Tu Nombre",
+  "license": "MIT"
+}
